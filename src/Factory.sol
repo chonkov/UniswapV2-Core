@@ -19,18 +19,20 @@ contract Factory is IFactory, Ownable2Step {
 
     function createPair(address tokenA, address tokenB) external returns (address pair) {
         if (tokenA == tokenB) revert Factory_Identical_Addresses();
-        if (tokenA == address(0)) revert Factory_Zero_Address();
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        if (token0 == address(0)) revert Factory_Zero_Address();
         if (_pairs[token0][token1] != address(0)) revert Factory_Pair_Already_Exists();
-        bytes memory bytecode = type(Pair).creationCode;
+
+        bytes memory bytecode = abi.encodePacked(type(Pair).creationCode, abi.encode(token0, token1));
         bytes32 salt = keccak256(abi.encodePacked(token0, token1));
         assembly {
             pair := create2(0, add(bytecode, 32), mload(bytecode), salt)
         }
-        Pair(pair).initialize(token0, token1);
+
         _pairs[token0][token1] = pair;
         _pairs[token1][token0] = pair;
         _allPairs.push(pair);
+
         emit PairCreated(token0, token1, pair, _allPairs.length);
     }
 

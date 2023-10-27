@@ -13,11 +13,14 @@ contract ShareToken is Ownable, ERC20Permit {
     event ShareTokenMinted(address, uint256);
     event ShareTokenBurned(address, uint256);
 
+    string public constant NAME = "ShareToken";
+    string public constant SYMBOL = "STKN";
+
     /**
      *  @notice {EIP2612} `name` and {EIP20} `name` MUST be the same
      *  @dev Initializes the {EIP2612} `name` and {EIP20} `name` & `symbol`
      */
-    constructor(string memory name, string memory symbol) Ownable(_msgSender()) ERC20Permit(name) ERC20(name, symbol) {}
+    constructor() Ownable(_msgSender()) ERC20Permit(NAME) ERC20(NAME, SYMBOL) {}
 
     function mint(address to, uint256 amount) external onlyOwner {
         _mint(to, amount);
