@@ -2,10 +2,12 @@
 pragma solidity 0.8.21;
 
 import {Context} from "lib/openzeppelin-contracts/contracts/utils/Context.sol";
+import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
 import {IPair} from "./interfaces/IPair.sol";
+import {IFactory} from "./interfaces/IFactory.sol";
 import {ICallee} from "./interfaces/ICallee.sol";
 import {ShareToken} from "./ShareToken.sol";
 
@@ -49,7 +51,6 @@ contract Pair is IPair, Context, ShareToken {
         token1 = _token1;
     }
 
-    // update reserves and, on the first call per block, price accumulators
     function _update(uint256 balance0, uint256 balance1, uint112 _reserve0, uint112 _reserve1) private {
         if (balance0 > type(uint112).max || balance1 > type(uint112).max) revert Pair_Overflow();
 
@@ -71,7 +72,52 @@ contract Pair is IPair, Context, ShareToken {
         emit Sync(reserve0, reserve1);
     }
 
-    // this low-level function should be called from a contract which performs important safety checks
+    function _mintFee(uint256 _reserve0, uint256 _reserve1) private returns (bool feeOn) {
+        address feeTo = IFactory(factory).feeTo();
+        feeOn = feeTo != address(0);
+        uint256 _kLast = kLast;
+
+        if (feeOn) {
+            if (_kLast != 0) {
+                uint256 rootK = Math.sqrt(_reserve0 * _reserve1);
+                uint256 rootKLast = Math.sqrt(_kLast);
+                if (rootK > rootKLast) {
+                    uint256 numerator = totalSupply() * uint256(rootK - rootKLast);
+                    uint256 denominator = rootK * 5 + rootKLast;
+                    uint256 liquidity = numerator / denominator;
+                    if (liquidity > 0) _mint(feeTo, liquidity);
+                }
+            }
+        } else if (_kLast != 0) {
+            kLast = 0;
+        }
+    }
+
+    function mint(address to) external lock returns (uint256 liquidity) {
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+        uint256 amount0 = balance0 - _reserve0;
+        uint256 amount1 = balance1 - _reserve1;
+
+        bool feeOn = _mintFee(_reserve0, _reserve1);
+
+        uint256 _totalSupply = totalSupply();
+        if (_totalSupply == 0) {
+            liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
+            _mint(address(0), MINIMUM_LIQUIDITY);
+        } else {
+            liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
+        }
+        if (liquidity == 0) revert Pair_Insufficient_Liquidity();
+        _mint(to, liquidity);
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        if (feeOn) kLast = uint256(reserve0) * reserve1;
+
+        emit Mint(_msgSender(), amount0, amount1);
+    }
+
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external lock {
         // Example:
         // token0 = ETH, token1 = DAI
@@ -95,7 +141,7 @@ contract Pair is IPair, Context, ShareToken {
 
             if (amount0Out > 0) IERC20(_token0).safeTransfer(to, amount0Out);
             if (amount1Out > 0) IERC20(_token1).safeTransfer(to, amount1Out);
-            if (data.length > 0) ICallee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data); // 'FlashSwap'
+            if (data.length > 0) ICallee(to).uniswapV2Call(_msgSender(), amount0Out, amount1Out, data); // 'FlashSwap'
             balance0 = IERC20(_token0).balanceOf(address(this));
             balance1 = IERC20(_token1).balanceOf(address(this));
         }
@@ -115,7 +161,7 @@ contract Pair is IPair, Context, ShareToken {
         }
 
         _update(balance0, balance1, uint112(_reserve0), uint112(_reserve1));
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        emit Swap(_msgSender(), amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
     function skim(address to) external lock {
