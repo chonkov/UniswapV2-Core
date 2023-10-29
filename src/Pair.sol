@@ -4,11 +4,14 @@ pragma solidity 0.8.21;
 import {Context} from "lib/openzeppelin-contracts/contracts/utils/Context.sol";
 import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {ERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
 import {IPair} from "./interfaces/IPair.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {ICallee} from "./interfaces/ICallee.sol";
+import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
+import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {ShareToken} from "./ShareToken.sol";
 
 error Pair_Locked();
@@ -20,10 +23,11 @@ error Pair_Overflow();
 error Pair_Invalid_Receiver();
 error Pair_Invalid_K();
 
-contract Pair is IPair, Context, ShareToken {
+contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
     using SafeERC20 for IERC20;
 
     uint256 public constant MINIMUM_LIQUIDITY = 10 ** 3;
+    bytes32 public constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     address public immutable factory;
     address public immutable token0;
@@ -203,6 +207,76 @@ contract Pair is IPair, Context, ShareToken {
 
     function sync() external {
         _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
+    }
+
+    /**
+     * @dev Loan `amount` tokens to `receiver`, and takes it back plus a `flashFee` after the callback.
+     * @param receiver The contract receiving the tokens, needs to implement the `onFlashLoan(address user, uint256 amount, uint256 fee, bytes calldata)` interface.
+     * @param token The loan currency.
+     * @param amount The amount of tokens lent.
+     * @param data A data parameter to be passed on to the `receiver` for any custom use.
+     */
+    function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
+        external
+        override
+        returns (bool)
+    {
+        require(
+            ERC165(address(receiver)).supportsInterface(type(IERC3156FlashBorrower).interfaceId),
+            "Receiver must implement IERC3156FlashBorrower interafce."
+        );
+        require(token == token0 || token == token1, "FlashLender: Unsupported currency");
+
+        uint256 calculatedLoanFee = _flashFee(token, amount);
+
+        IERC20(token).safeTransfer(address(receiver), amount);
+
+        require(
+            receiver.onFlashLoan(msg.sender, token, amount, calculatedLoanFee, data) == CALLBACK_SUCCESS,
+            "FlashLender: Callback failed"
+        );
+
+        IERC20(token).safeTransferFrom(address(receiver), address(this), amount + calculatedLoanFee);
+
+        return true;
+    }
+
+    /**
+     * @dev The fee to be charged for a given loan.
+     * @param token The loan currency.
+     * @param amount The amount of tokens lent.
+     * @return The amount of `token` to be charged for the loan, on top of the returned principal.
+     */
+    function flashFee(address token, uint256 amount) external view override returns (uint256) {
+        require(token == token0 || token == token1, "FlashLender: Unsupported currency");
+        return _flashFee(token, amount);
+    }
+
+    /**
+     * @dev The fee to be charged for a given loan. Internal function with no checks.
+     * @notice The fee is 0, since there are no charges on flash swaps.
+     * @return The amount of `token` to be charged for the loan, on top of the returned principal.
+     */
+    function _flashFee(address, /*token*/ uint256 /*amount*/ ) internal pure returns (uint256) {
+        return 0;
+    }
+
+    /**
+     * @dev The amount of currency available to be lent.
+     * @param token The loan currency.
+     * @return The amount of `token` that can be borrowed.
+     */
+    function maxFlashLoan(address token) external view override returns (uint256) {
+        return token == token0
+            ? IERC20(token0).balanceOf(address(this))
+            : token == token1 ? IERC20(token1).balanceOf(address(this)) : 0;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165) returns (bool) {
+        return interfaceId == type(IERC3156FlashLender).interfaceId || super.supportsInterface(interfaceId);
     }
 
     function getReserves() public view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast) {
