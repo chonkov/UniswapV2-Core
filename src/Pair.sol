@@ -12,9 +12,10 @@ import {ICallee} from "./interfaces/ICallee.sol";
 import {ShareToken} from "./ShareToken.sol";
 
 error Pair_Locked();
-// error Pair_Access_Denied();
 error Pair_Insufficient_Amounts();
 error Pair_Insufficient_Liquidity();
+error Pair_Insufficient_Liquidity_Minted();
+error Pair_Insufficient_Liquidity_Burned();
 error Pair_Overflow();
 error Pair_Invalid_Receiver();
 error Pair_Invalid_K();
@@ -109,13 +110,41 @@ contract Pair is IPair, Context, ShareToken {
         } else {
             liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
         }
-        if (liquidity == 0) revert Pair_Insufficient_Liquidity();
+        if (liquidity == 0) revert Pair_Insufficient_Liquidity_Minted();
         _mint(to, liquidity);
 
         _update(balance0, balance1, _reserve0, _reserve1);
         if (feeOn) kLast = uint256(reserve0) * reserve1;
 
         emit Mint(_msgSender(), amount0, amount1);
+    }
+
+    function burn(address to) external lock returns (uint256 amount0, uint256 amount1) {
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
+        address _token0 = token0;
+        address _token1 = token1;
+        uint256 balance0 = IERC20(_token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(_token1).balanceOf(address(this));
+        uint256 liquidity = balanceOf(address(this));
+
+        bool feeOn = _mintFee(_reserve0, _reserve1);
+        uint256 _totalSupply = totalSupply();
+        amount0 = (liquidity * balance0) / _totalSupply; // using balances ensures pro-rata distribution
+        amount1 = (liquidity * balance1) / _totalSupply; // using balances ensures pro-rata distribution
+
+        if (amount0 == 0 || amount1 == 0) revert Pair_Insufficient_Liquidity_Burned();
+
+        _burn(address(this), liquidity);
+        IERC20(_token0).safeTransfer(to, amount0);
+        IERC20(_token1).safeTransfer(to, amount1);
+        balance0 = IERC20(_token0).balanceOf(address(this));
+        balance1 = IERC20(_token1).balanceOf(address(this));
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+
+        if (feeOn) kLast = ud(reserve0).mul(ud(reserve1)).unwrap(); // reserve0 and reserve1 are up-to-date
+
+        emit Burn(msg.sender, amount0, amount1, to);
     }
 
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external lock {
