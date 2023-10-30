@@ -6,16 +6,17 @@ import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {ERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
+import {IERC3156FlashLender} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashLender.sol";
+import {IERC3156FlashBorrower} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashBorrower.sol";
 import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
 import {IPair} from "./interfaces/IPair.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {ICallee} from "./interfaces/ICallee.sol";
-import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
-import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {ShareToken} from "./ShareToken.sol";
 
 error Pair_Locked();
-error Pair_Insufficient_Amounts();
+error Pair_Invalid_Amounts();
 error Pair_Insufficient_Liquidity();
 error Pair_Insufficient_Liquidity_Minted();
 error Pair_Insufficient_Liquidity_Burned();
@@ -23,7 +24,7 @@ error Pair_Overflow();
 error Pair_Invalid_Receiver();
 error Pair_Invalid_K();
 
-contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
+contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 public constant MINIMUM_LIQUIDITY = 10 ** 3;
@@ -33,22 +34,13 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
     address public immutable token0;
     address public immutable token1;
 
-    uint112 private reserve0;
-    uint112 private reserve1;
+    UD60x18 private reserve0;
+    UD60x18 private reserve1;
     uint32 private blockTimestampLast;
 
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
     uint256 public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
-
-    bool private unlocked = true;
-
-    modifier lock() {
-        if (!unlocked) revert Pair_Locked();
-        unlocked = false;
-        _;
-        unlocked = true;
-    }
 
     constructor(address _token0, address _token1) {
         factory = _msgSender();
@@ -56,8 +48,10 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
         token1 = _token1;
     }
 
-    function _update(uint256 balance0, uint256 balance1, uint112 _reserve0, uint112 _reserve1) private {
-        if (balance0 > type(uint112).max || balance1 > type(uint112).max) revert Pair_Overflow();
+    function _update(uint256 balance0, uint256 balance1, uint256 _reserve0, uint256 _reserve1) private {
+        if (UD60x18.wrap(balance0) > MAX_WHOLE_UD60x18 || UD60x18.wrap(balance1) > MAX_WHOLE_UD60x18) {
+            revert Pair_Overflow();
+        }
 
         uint32 blockTimestamp = uint32(block.timestamp % 2 ** 32);
         uint32 timeElapsed = blockTimestamp - blockTimestampLast;
@@ -70,21 +64,21 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
             price1CumulativeLast += udReserve0.div(udReserve1).unwrap() * timeElapsed;
         }
 
-        reserve0 = uint112(balance0);
-        reserve1 = uint112(balance1);
+        reserve0 = UD60x18.wrap(balance0);
+        reserve1 = UD60x18.wrap(balance1);
         blockTimestampLast = blockTimestamp;
 
         emit Sync(reserve0, reserve1);
     }
 
-    function _mintFee(uint256 _reserve0, uint256 _reserve1) private returns (bool feeOn) {
+    function _mintFee(UD60x18 _reserve0, UD60x18 _reserve1) private returns (bool feeOn) {
         address feeTo = IFactory(factory).feeTo();
         feeOn = feeTo != address(0);
         uint256 _kLast = kLast;
 
         if (feeOn) {
             if (_kLast != 0) {
-                uint256 rootK = Math.sqrt(_reserve0 * _reserve1);
+                uint256 rootK = Math.sqrt(_reserve0.unwrap() * _reserve1.unwrap());
                 uint256 rootKLast = Math.sqrt(_kLast);
                 if (rootK > rootKLast) {
                     uint256 numerator = totalSupply() * uint256(rootK - rootKLast);
@@ -98,12 +92,12 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
         }
     }
 
-    function mint(address to) external lock returns (uint256 liquidity) {
-        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
+    function mint(address to) external nonReentrant returns (uint256 liquidity) {
+        (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
         uint256 balance1 = IERC20(token1).balanceOf(address(this));
-        uint256 amount0 = balance0 - _reserve0;
-        uint256 amount1 = balance1 - _reserve1;
+        uint256 amount0 = balance0 - _reserve0.unwrap();
+        uint256 amount1 = balance1 - _reserve1.unwrap();
 
         bool feeOn = _mintFee(_reserve0, _reserve1);
 
@@ -112,23 +106,23 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
             _mint(address(0), MINIMUM_LIQUIDITY);
         } else {
-            liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
+            liquidity =
+                Math.min((amount0 * _totalSupply) / _reserve0.unwrap(), (amount1 * _totalSupply) / _reserve1.unwrap());
+            assert(UD60x18.wrap(amount0).div(_reserve0) == UD60x18.wrap(amount0).div(_reserve0));
         }
         if (liquidity == 0) revert Pair_Insufficient_Liquidity_Minted();
         _mint(to, liquidity);
 
-        _update(balance0, balance1, _reserve0, _reserve1);
-        if (feeOn) kLast = uint256(reserve0) * reserve1;
+        _update(balance0, balance1, _reserve0.unwrap(), _reserve1.unwrap());
+        if (feeOn) kLast = reserve0.unwrap() * reserve1.unwrap();
 
         emit Mint(_msgSender(), amount0, amount1);
     }
 
-    function burn(address to) external lock returns (uint256 amount0, uint256 amount1) {
-        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
-        address _token0 = token0;
-        address _token1 = token1;
-        uint256 balance0 = IERC20(_token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(_token1).balanceOf(address(this));
+    function burn(address to) external nonReentrant returns (uint256 amount0, uint256 amount1) {
+        (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
         uint256 liquidity = balanceOf(address(this));
 
         bool feeOn = _mintFee(_reserve0, _reserve1);
@@ -139,74 +133,76 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
         if (amount0 == 0 || amount1 == 0) revert Pair_Insufficient_Liquidity_Burned();
 
         _burn(address(this), liquidity);
-        IERC20(_token0).safeTransfer(to, amount0);
-        IERC20(_token1).safeTransfer(to, amount1);
-        balance0 = IERC20(_token0).balanceOf(address(this));
-        balance1 = IERC20(_token1).balanceOf(address(this));
+        IERC20(token0).safeTransfer(to, amount0);
+        IERC20(token1).safeTransfer(to, amount1);
+        balance0 = IERC20(token0).balanceOf(address(this));
+        balance1 = IERC20(token1).balanceOf(address(this));
 
-        _update(balance0, balance1, _reserve0, _reserve1);
+        _update(balance0, balance1, _reserve0.unwrap(), _reserve1.unwrap());
+        if (feeOn) kLast = reserve0.unwrap() * reserve1.unwrap(); // reserve0 and reserve1 are up-to-date
 
-        if (feeOn) kLast = ud(reserve0).mul(ud(reserve1)).unwrap(); // reserve0 and reserve1 are up-to-date
-
-        emit Burn(msg.sender, amount0, amount1, to);
+        emit Burn(_msgSender(), amount0, amount1, to);
     }
 
-    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external lock {
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external nonReentrant {
         // Example:
         // token0 = ETH, token1 = DAI
         // Before swap is made and no tokens are transfered: reserve0 = 10 ETH, reserve1 = 10,000 DAI => K = 100,000
         // Before `swap` is called - user calls 'transfer' and sends 2,5 ETH => reserve0 = 12,5 ETH => amount0Out = 0 && amount1Out = 2,000
         // amount1Out = reserve1 - K / reserve0' (reserve0' = reserve0 + 2,5 ETH = 12,5 ETH)
 
-        if (amount0Out == 0 && amount1Out == 0) revert Pair_Insufficient_Amounts();
-        (uint256 _reserve0, uint256 _reserve1,) = getReserves();
+        if ((amount0Out == 0 && amount1Out == 0) || (amount0Out > 0 && amount1Out > 0)) revert Pair_Invalid_Amounts();
+        (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
 
-        if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert Pair_Insufficient_Liquidity();
+        if (amount0Out >= _reserve0.unwrap() || amount1Out >= _reserve1.unwrap()) revert Pair_Insufficient_Liquidity();
 
         uint256 balance0;
         uint256 balance1;
         {
             // scope for _token{0,1}, avoids stack too deep errors
+            if (to == token0 || to == token1) revert Pair_Invalid_Receiver();
 
-            address _token0 = token0;
-            address _token1 = token1;
-            if (to == _token0 || to == _token1) revert Pair_Invalid_Receiver();
-
-            if (amount0Out > 0) IERC20(_token0).safeTransfer(to, amount0Out);
-            if (amount1Out > 0) IERC20(_token1).safeTransfer(to, amount1Out);
+            if (amount0Out > 0) IERC20(token0).safeTransfer(to, amount0Out);
+            if (amount1Out > 0) IERC20(token1).safeTransfer(to, amount1Out);
             if (data.length > 0) ICallee(to).uniswapV2Call(_msgSender(), amount0Out, amount1Out, data); // 'FlashSwap'
-            balance0 = IERC20(_token0).balanceOf(address(this));
-            balance1 = IERC20(_token1).balanceOf(address(this));
+            balance0 = IERC20(token0).balanceOf(address(this));
+            balance1 = IERC20(token1).balanceOf(address(this));
         }
 
         // 12,5 ETH > 10 ETH - 0 (amount0Out = 0) => amount0In = 2,5 ETH
-        uint256 amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
+        uint256 amount0In =
+            balance0 > _reserve0.unwrap() - amount0Out ? balance0 - (_reserve0.unwrap() - amount0Out) : 0;
         // 8,000 DAI > 10,000 DAI - 2,000 DAI (amount0Out = 2,000) => amount1In = 0
-        uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+        uint256 amount1In =
+            balance1 > _reserve1.unwrap() - amount1Out ? balance1 - (_reserve1.unwrap() - amount1Out) : 0;
 
-        if (amount0In == 0 && amount1In == 0) revert Pair_Insufficient_Amounts();
+        if (amount0In == 0 && amount1In == 0) revert Pair_Invalid_Amounts();
         {
             // scope for reserve{0,1}Adjusted, avoids stack too deep errors
             uint256 balance0Adjusted = balance0 * 1000 - amount0In * 3;
             uint256 balance1Adjusted = balance1 * 1000 - amount1In * 3;
             // (12,5 - dx(amount0In * 3))*(8,000) >= 10 * 10,000, but dx has been already paid as a fee
-            if (balance0Adjusted * balance1Adjusted < _reserve0 * _reserve1 * 1000 ** 2) revert Pair_Invalid_K();
+            if (balance0Adjusted * balance1Adjusted < _reserve0.unwrap() * _reserve1.unwrap() * 1000 ** 2) {
+                revert Pair_Invalid_K();
+            }
         }
 
-        _update(balance0, balance1, uint112(_reserve0), uint112(_reserve1));
+        _update(balance0, balance1, _reserve0.unwrap(), _reserve1.unwrap());
         emit Swap(_msgSender(), amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
-    function skim(address to) external lock {
-        // Cache storage variables
-        address _token0 = token0;
-        address _token1 = token1;
-        IERC20(_token0).safeTransfer(to, IERC20(_token0).balanceOf(address(this)) - reserve0);
-        IERC20(_token1).safeTransfer(to, IERC20(_token1).balanceOf(address(this)) - reserve1);
+    function skim(address to) external nonReentrant {
+        IERC20(token0).safeTransfer(to, IERC20(token0).balanceOf(address(this)) - reserve0.unwrap());
+        IERC20(token1).safeTransfer(to, IERC20(token1).balanceOf(address(this)) - reserve1.unwrap());
     }
 
-    function sync() external {
-        _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
+    function sync() external nonReentrant {
+        _update(
+            IERC20(token0).balanceOf(address(this)),
+            IERC20(token1).balanceOf(address(this)),
+            reserve0.unwrap(),
+            reserve1.unwrap()
+        );
     }
 
     /**
@@ -219,22 +215,20 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
     function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
         external
         override
+        nonReentrant
         returns (bool)
     {
-        require(
-            ERC165(address(receiver)).supportsInterface(type(IERC3156FlashBorrower).interfaceId),
-            "Receiver must implement IERC3156FlashBorrower interafce."
-        );
-        require(token == token0 || token == token1, "FlashLender: Unsupported currency");
+        // "Receiver must implement IERC3156FlashBorrower interafce."
+        if (ERC165(address(receiver)).supportsInterface(type(IERC3156FlashBorrower).interfaceId)) revert();
+        //  "FlashLender: Unsupported currency"
+        if (token != token0 && token != token1) revert();
 
         uint256 calculatedLoanFee = _flashFee(token, amount);
 
         IERC20(token).safeTransfer(address(receiver), amount);
 
-        require(
-            receiver.onFlashLoan(msg.sender, token, amount, calculatedLoanFee, data) == CALLBACK_SUCCESS,
-            "FlashLender: Callback failed"
-        );
+        // "FlashLender: Callback failed"
+        if (receiver.onFlashLoan(_msgSender(), token, amount, calculatedLoanFee, data) != CALLBACK_SUCCESS) revert();
 
         IERC20(token).safeTransferFrom(address(receiver), address(this), amount + calculatedLoanFee);
 
@@ -248,7 +242,8 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
      * @return The amount of `token` to be charged for the loan, on top of the returned principal.
      */
     function flashFee(address token, uint256 amount) external view override returns (uint256) {
-        require(token == token0 || token == token1, "FlashLender: Unsupported currency");
+        //  "FlashLender: Unsupported currency"
+        if (token != token0 && token != token1) revert();
         return _flashFee(token, amount);
     }
 
@@ -279,7 +274,7 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken {
         return interfaceId == type(IERC3156FlashLender).interfaceId || super.supportsInterface(interfaceId);
     }
 
-    function getReserves() public view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast) {
+    function getReserves() public view returns (UD60x18 _reserve0, UD60x18 _reserve1, uint32 _blockTimestampLast) {
         _reserve0 = reserve0;
         _reserve1 = reserve1;
         _blockTimestampLast = blockTimestampLast;
