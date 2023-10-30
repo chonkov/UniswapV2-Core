@@ -115,6 +115,56 @@ contract PairTest is Test {
         assertEq(reserve1.unwrap(), amount1);
         assertEq(pair.balanceOf(user1) + 1_000, pair.totalSupply());
         assertEq(pair.kLast(), 0);
+
+        amount0 = ERC20(token0).balanceOf(user2);
+        amount1 = ERC20(token1).balanceOf(user2);
+
+        assertEq(ERC20(token0).balanceOf(user2), 10 ether);
+        assertEq(ERC20(token1).balanceOf(user2), 100_000 ether);
+
+        vm.startPrank(user2);
+        ERC20(token0).safeTransfer(address(pair), amount0);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        pair.mint(user2);
+        vm.stopPrank();
+
+        (reserve0, reserve1,) = pair.getReserves();
+
+        assertEq(reserve0.unwrap(), amount0 * 2);
+        assertEq(reserve1.unwrap(), amount1 * 2);
+        assertEq(ERC20(token0).balanceOf(address(pair)), amount0 * 2);
+        assertEq(ERC20(token1).balanceOf(address(pair)), amount1 * 2);
+        assertEq(pair.balanceOf(user1) + 1_000, pair.totalSupply() / 2);
+        assertEq((pair.balanceOf(user2) * 2), pair.totalSupply());
+    }
+
+    function testMintFailInsufficientLiquidityMinted() public {
+        vm.startPrank(user1);
+        ERC20(token0).safeTransfer(address(pair), 100);
+        ERC20(token1).safeTransfer(address(pair), 10000);
+        vm.expectRevert(Pair.Pair_Insufficient_Liquidity_Minted.selector);
+        pair.mint(user1);
+    }
+
+    function testMintFailOverflow() public {
+        // Creating a fresh new user and pair due to the already minted tokens in the 'setUp' function
+        address user4 = address(444);
+        Token0 t0 = new Token0();
+        Token1 t1 = new Token1();
+
+        // MAX_WHOLE_UD60x18 is slightly less than the type(uint256).max, the minting
+        // and the calculations in 'mint', '_mintFee' & '_update' can be executed
+        t0.mint(user4, MAX_WHOLE_UD60x18.unwrap());
+        t1.mint(user4, MAX_WHOLE_UD60x18.unwrap() + 1);
+
+        factory.createPair(address(t0), address(t1));
+        Pair _pair = Pair(factory.getPair(address(t0), address(t1)));
+
+        vm.startPrank(user4);
+        ERC20(t0).safeTransfer(address(_pair), 1);
+        ERC20(t1).safeTransfer(address(_pair), MAX_WHOLE_UD60x18.unwrap() + 1);
+        vm.expectRevert(Pair.Pair_Overflow.selector);
+        _pair.mint(user4);
     }
 
     function testBurn() public {
