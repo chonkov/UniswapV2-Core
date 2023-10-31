@@ -5,6 +5,8 @@ import {Test, console2} from "forge-std/Test.sol";
 import {Factory} from "../src/Factory.sol";
 import {Pair} from "../src/Pair.sol";
 import {ERC20, IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
+
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC3156FlashLender} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashLender.sol";
 import {IERC3156FlashBorrower} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashBorrower.sol";
@@ -29,6 +31,18 @@ contract Token1 is ERC20 {
 
 contract PairTest is Test {
     using SafeERC20 for ERC20;
+
+    event Mint(address indexed sender, uint256 amount0, uint256 amount1);
+    event Burn(address indexed sender, uint256 amount0, uint256 amount1, address indexed to);
+    event Swap(
+        address indexed sender,
+        uint256 amount0In,
+        uint256 amount1In,
+        uint256 amount0Out,
+        uint256 amount1Out,
+        address indexed to
+    );
+    event Sync(UD60x18 reserve0, UD60x18 reserve1);
 
     address public token0;
     address public token1;
@@ -106,6 +120,8 @@ contract PairTest is Test {
         vm.startPrank(user1);
         ERC20(token0).safeTransfer(address(pair), amount0);
         ERC20(token1).safeTransfer(address(pair), amount1);
+        vm.expectEmit();
+        emit Mint(user1, amount0, amount1);
         pair.mint(user1);
         vm.stopPrank();
 
@@ -115,6 +131,7 @@ contract PairTest is Test {
         assertEq(reserve1.unwrap(), amount1);
         assertEq(pair.balanceOf(user1) + 1_000, pair.totalSupply());
         assertEq(pair.kLast(), 0);
+        assertEq(pair.balanceOf(address(pair.vault())), pair.MINIMUM_LIQUIDITY());
 
         amount0 = ERC20(token0).balanceOf(user2);
         amount1 = ERC20(token1).balanceOf(user2);
@@ -136,6 +153,28 @@ contract PairTest is Test {
         assertEq(ERC20(token1).balanceOf(address(pair)), amount1 * 2);
         assertEq(pair.balanceOf(user1) + 1_000, pair.totalSupply() / 2);
         assertEq((pair.balanceOf(user2) * 2), pair.totalSupply());
+        assertEq(pair.balanceOf(address(pair.vault())), pair.MINIMUM_LIQUIDITY());
+    }
+
+    function testMintInvalidReserves() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        ERC20(token0).safeTransfer(address(pair), amount0);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        pair.mint(user1);
+        vm.stopPrank();
+
+        amount0 = ERC20(token0).balanceOf(user2);
+        amount1 = ERC20(token1).balanceOf(user2);
+
+        vm.startPrank(user2);
+        ERC20(token0).safeTransfer(address(pair), amount0 - 10);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        vm.expectRevert();
+        pair.mint(user2);
+        vm.stopPrank();
     }
 
     function testMintFailInsufficientLiquidityMinted() public {
@@ -175,17 +214,53 @@ contract PairTest is Test {
         ERC20(token0).safeTransfer(address(pair), amount0);
         ERC20(token1).safeTransfer(address(pair), amount1);
         pair.mint(user1);
+        vm.stopPrank();
 
-        uint256 amount = pair.balanceOf(user1);
+        amount0 = ERC20(token0).balanceOf(user2);
+        amount1 = ERC20(token1).balanceOf(user2);
+
+        vm.startPrank(user2);
+        ERC20(token0).safeTransfer(address(pair), amount0);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        pair.mint(user2);
+
+        uint256 amount = pair.balanceOf(user2);
+
         ERC20(pair).transfer(address(pair), amount);
+        vm.expectEmit();
+        emit Burn(user2, amount0, amount1, user1);
         pair.burn(user1);
-
         vm.stopPrank();
 
         (UD60x18 reserve0, UD60x18 reserve1,) = pair.getReserves();
 
-        assertEq(reserve0.unwrap(), 10);
-        assertEq(reserve1.unwrap(), 100_000);
-        assertEq(pair.totalSupply(), pair.MINIMUM_LIQUIDITY());
+        assertEq(reserve0.unwrap(), 10 ether);
+        assertEq(reserve1.unwrap(), 100_000 ether);
+        assertEq(ERC20(token0).balanceOf(user1), 10 ether);
+        assertEq(ERC20(token1).balanceOf(user1), 100_000 ether);
+        assertEq(ERC20(token0).balanceOf(user2), 0);
+        assertEq(ERC20(token1).balanceOf(user2), 0);
+        assertEq(pair.totalSupply(), Math.sqrt(amount0 * amount1));
+        assertEq(pair.totalSupply(), Math.sqrt(reserve0.unwrap() * reserve1.unwrap()));
+
+        amount = pair.balanceOf(user1);
+
+        vm.startPrank(user1);
+        ERC20(pair).transfer(address(pair), amount);
+        vm.expectEmit();
+        emit Burn(user1, amount0 - 10, amount1 - 100_000, user1);
+        pair.burn(user1);
+        vm.stopPrank();
+
+        (reserve0, reserve1,) = pair.getReserves();
+        assertEq(pair.totalSupply(), Math.sqrt(reserve0.unwrap() * reserve1.unwrap()));
+        assertEq(ERC20(token0).balanceOf(user1) + 10, 20 ether);
+        assertEq(ERC20(token1).balanceOf(user1) + 100_000, 200_000 ether);
     }
+
+    function testMintFailInsufficientLiquidityBurned() public {}
+
+    function testSkim() public {}
+
+    function testSync() public {}
 }
