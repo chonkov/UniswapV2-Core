@@ -258,9 +258,60 @@ contract PairTest is Test {
         assertEq(ERC20(token1).balanceOf(user1) + 100_000, 200_000 ether);
     }
 
-    function testMintFailInsufficientLiquidityBurned() public {}
+    function testBurnFailInsufficientLiquidityBurned() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
 
-    function testSkim() public {}
+        vm.startPrank(user1);
+        ERC20(token0).safeTransfer(address(pair), amount0);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        pair.mint(user1);
 
-    function testSync() public {}
+        vm.expectRevert(Pair.Pair_Insufficient_Liquidity_Burned.selector);
+        pair.burn(user1);
+        vm.stopPrank();
+    }
+
+    function testSkim() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        ERC20(token0).safeTransfer(address(pair), amount0);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        vm.stopPrank();
+
+        vm.startPrank(user2);
+        pair.skim(user2);
+        vm.stopPrank();
+
+        assertEq(ERC20(token0).balanceOf(address(pair)), 0);
+        assertEq(ERC20(token1).balanceOf(address(pair)), 0);
+        assertEq(ERC20(token0).balanceOf(user2), amount0 * 2);
+        assertEq(ERC20(token1).balanceOf(user2), amount1 * 2);
+    }
+
+    function testSync() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        ERC20(token0).safeTransfer(address(pair), amount0 / 2);
+        ERC20(token1).safeTransfer(address(pair), amount1);
+        pair.mint(user1);
+
+        (UD60x18 reserve0,,) = pair.getReserves();
+        assertEq(reserve0.unwrap(), 5 ether);
+
+        ERC20(token0).safeTransfer(address(pair), amount0 / 2);
+
+        (reserve0,,) = pair.getReserves();
+        assertEq(reserve0.unwrap(), 5 ether);
+
+        pair.sync();
+        (reserve0,,) = pair.getReserves();
+        assertEq(reserve0.unwrap(), 10 ether);
+
+        vm.stopPrank();
+    }
 }
