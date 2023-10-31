@@ -110,6 +110,8 @@ contract PairTest is Test {
     }
 
     function testMint() public {
+        uint256 blockTimestamp = block.timestamp;
+
         (UD60x18 reserve0, UD60x18 reserve1,) = pair.getReserves();
         assertEq(reserve0.unwrap(), 0);
         assertEq(reserve1.unwrap(), 0);
@@ -139,6 +141,8 @@ contract PairTest is Test {
         assertEq(ERC20(token0).balanceOf(user2), 10 ether);
         assertEq(ERC20(token1).balanceOf(user2), 100_000 ether);
 
+        vm.warp(blockTimestamp + 12);
+
         vm.startPrank(user2);
         ERC20(token0).safeTransfer(address(pair), amount0);
         ERC20(token1).safeTransfer(address(pair), amount1);
@@ -154,6 +158,9 @@ contract PairTest is Test {
         assertEq(pair.balanceOf(user1) + 1_000, pair.totalSupply() / 2);
         assertEq((pair.balanceOf(user2) * 2), pair.totalSupply());
         assertEq(pair.balanceOf(address(pair.vault())), pair.MINIMUM_LIQUIDITY());
+
+        assertEq(pair.price0CumulativeLast(), (reserve1.div(reserve0)).unwrap() * 12);
+        assertEq(pair.price1CumulativeLast(), (reserve0.div(reserve1)).unwrap() * 12);
     }
 
     function testMintInvalidReserves() public {
