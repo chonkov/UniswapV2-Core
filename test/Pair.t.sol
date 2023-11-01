@@ -11,7 +11,7 @@ import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/
 import {IERC3156FlashLender} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashLender.sol";
 import {IERC3156FlashBorrower} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashBorrower.sol";
 import {ERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
-import {UD60x18, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
+import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
 
 contract Token0 is ERC20 {
     constructor() ERC20("Token0", "TKN0") {}
@@ -43,6 +43,8 @@ contract PairTest is Test {
         address indexed to
     );
     event Sync(UD60x18 reserve0, UD60x18 reserve1);
+
+    bytes EMPTY_DATA = "";
 
     address public token0;
     address public token1;
@@ -87,6 +89,16 @@ contract PairTest is Test {
         Token1(token1).mint(user1, 100_000 ether);
         Token1(token1).mint(user2, 100_000 ether);
         Token1(token1).mint(user3, 200_000 ether);
+    }
+
+    function addLiquidity(uint256 token0Amount, uint256 token1Amount, address to) private {
+        ERC20(token0).safeTransfer(address(pair), token0Amount);
+        ERC20(token1).safeTransfer(address(pair), token1Amount);
+        pair.mint(to);
+    }
+
+    function inputAmountPlusFee(UD60x18 x, UD60x18 y, UD60x18 dy) private pure returns (UD60x18 dx) {
+        dx = (x.mul(dy).mul(ud(1000)) / y.sub(dy).mul(ud(997))).add(ud(1));
     }
 
     function testSetUp() public {
@@ -144,9 +156,7 @@ contract PairTest is Test {
         vm.warp(blockTimestamp + 12);
 
         vm.startPrank(user2);
-        ERC20(token0).safeTransfer(address(pair), amount0);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user2);
+        addLiquidity(amount0, amount1, user2);
         vm.stopPrank();
 
         (reserve0, reserve1,) = pair.getReserves();
@@ -168,13 +178,8 @@ contract PairTest is Test {
         uint256 amount1 = ERC20(token1).balanceOf(user1);
 
         vm.startPrank(user1);
-        ERC20(token0).safeTransfer(address(pair), amount0);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user1);
+        addLiquidity(amount0, amount1, user1);
         vm.stopPrank();
-
-        amount0 = ERC20(token0).balanceOf(user2);
-        amount1 = ERC20(token1).balanceOf(user2);
 
         vm.startPrank(user2);
         ERC20(token0).safeTransfer(address(pair), amount0 - 10);
@@ -218,18 +223,11 @@ contract PairTest is Test {
         uint256 amount1 = ERC20(token1).balanceOf(user1);
 
         vm.startPrank(user1);
-        ERC20(token0).safeTransfer(address(pair), amount0);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user1);
+        addLiquidity(amount0, amount1, user1);
         vm.stopPrank();
 
-        amount0 = ERC20(token0).balanceOf(user2);
-        amount1 = ERC20(token1).balanceOf(user2);
-
         vm.startPrank(user2);
-        ERC20(token0).safeTransfer(address(pair), amount0);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user2);
+        addLiquidity(amount0, amount1, user2);
 
         uint256 amount = pair.balanceOf(user2);
 
@@ -270,13 +268,126 @@ contract PairTest is Test {
         uint256 amount1 = ERC20(token1).balanceOf(user1);
 
         vm.startPrank(user1);
-        ERC20(token0).safeTransfer(address(pair), amount0);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user1);
+        addLiquidity(amount0, amount1, user1);
 
         vm.expectRevert(Pair.Pair_Insufficient_Liquidity_Burned.selector);
         pair.burn(user1);
         vm.stopPrank();
+    }
+
+    function testSwapFailInvalidAmounts() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        vm.startPrank(user2);
+        vm.expectRevert(Pair.Pair_Invalid_Out_Amounts.selector);
+        pair.swap(0, 0, user2, EMPTY_DATA);
+
+        vm.expectRevert(Pair.Pair_Invalid_In_Amounts.selector);
+        pair.swap(amount0 / 2, amount1 / 2, user2, EMPTY_DATA);
+        vm.stopPrank();
+    }
+
+    function testSwapFailInsufficientLiquidity() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        amount0 = ERC20(token0).balanceOf(user3);
+        amount1 = ERC20(token1).balanceOf(user3);
+
+        vm.startPrank(user3);
+        vm.expectRevert(Pair.Pair_Insufficient_Liquidity.selector);
+        pair.swap(amount0, 0, user3, EMPTY_DATA);
+
+        vm.expectRevert(Pair.Pair_Insufficient_Liquidity.selector);
+        pair.swap(0, amount1, user3, EMPTY_DATA);
+
+        vm.stopPrank();
+    }
+
+    function testSwapFailInvalidReceiver() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        amount0 = 0;
+        amount1 = 20_000;
+
+        vm.startPrank(user3);
+        vm.expectRevert(Pair.Pair_Invalid_Receiver.selector);
+        pair.swap(amount0, amount1, token0, EMPTY_DATA);
+
+        vm.expectRevert(Pair.Pair_Invalid_Receiver.selector);
+        pair.swap(amount0, amount1, token1, EMPTY_DATA);
+        vm.stopPrank();
+    }
+
+    function testSwapFailInvalidK() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        // `user2` transfers 2.5 ether before calling swap
+        uint256 amount0In = 5 ether / 2;
+        uint256 amount0Out = 0;
+        uint256 amount1Out = 20_000 ether;
+
+        vm.startPrank(user2);
+        ERC20(token0).transfer(address(pair), amount0In);
+        vm.expectRevert(Pair.Pair_Invalid_K.selector);
+        pair.swap(amount0Out, amount1Out, user2, EMPTY_DATA);
+        vm.stopPrank();
+    }
+
+    function testSwap() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        //   `user2` transfers 2.5 + fee ether before calling swap
+        uint256 amount0In;
+        uint256 amount1In = 0;
+        uint256 amount0Out = 0;
+        uint256 amount1Out = 20_000 ether;
+
+        (UD60x18 reserve0, UD60x18 reserve1,) = pair.getReserves();
+
+        amount0In = (inputAmountPlusFee(reserve0, reserve1, ud(amount1Out))).unwrap(); // 2507522567703109328 ~ 2.5075 ether
+
+        vm.startPrank(user2);
+        ERC20(token0).transfer(address(pair), amount0In);
+        vm.expectEmit();
+        emit Swap(user2, amount0In, amount1In, amount0Out, amount1Out, user2);
+        pair.swap(amount0Out, amount1Out, user2, EMPTY_DATA);
+        vm.stopPrank();
+
+        (reserve0, reserve1,) = pair.getReserves();
+
+        assertEq(ERC20(token0).balanceOf(user2), amount0 - amount0In);
+        assertEq(ERC20(token1).balanceOf(user2), amount1 + amount1Out);
+        assertEq(ERC20(token0).balanceOf(address(pair)), reserve0.unwrap());
+        assertEq(ERC20(token1).balanceOf(address(pair)), reserve1.unwrap());
+        assertEq(ERC20(token0).balanceOf(user2), amount0 - amount0In);
+        assertEq(ERC20(token1).balanceOf(user2), 120_000 ether);
+        assertEq(reserve0.unwrap(), amount0 + amount0In);
+        assertEq(reserve1.unwrap(), 80_000 ether);
     }
 
     function testSkim() public {
@@ -303,9 +414,7 @@ contract PairTest is Test {
         uint256 amount1 = ERC20(token1).balanceOf(user1);
 
         vm.startPrank(user1);
-        ERC20(token0).safeTransfer(address(pair), amount0 / 2);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        pair.mint(user1);
+        addLiquidity(amount0 / 2, amount1, user1);
 
         (UD60x18 reserve0,,) = pair.getReserves();
         assertEq(reserve0.unwrap(), 5 ether);
