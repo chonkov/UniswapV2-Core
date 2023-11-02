@@ -29,6 +29,83 @@ contract Token1 is ERC20 {
     }
 }
 
+contract TestFlashBorrower is IERC3156FlashBorrower, ERC165 {
+    IERC3156FlashLender lender;
+    uint256 public counter;
+
+    constructor(IERC3156FlashLender lender_) {
+        lender = lender_;
+    }
+
+    /// @dev ERC-3156 Flash loan callback
+    function onFlashLoan(
+        address initiator,
+        address, /* token*/
+        uint256, /* amount*/
+        uint256, /*fee*/
+        bytes calldata /*data*/
+    ) external override returns (bytes32) {
+        require(msg.sender == address(lender));
+        require(initiator == address(this));
+
+        counter++;
+
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
+    }
+
+    /// @dev Initiate a flash loan
+    function flashBorrow(address token, uint256 amount) public {
+        uint256 _allowance = IERC20(token).allowance(address(this), address(lender));
+        uint256 _fee = lender.flashFee(token, amount); // 0
+        uint256 _repayment = amount + _fee; // amount
+        IERC20(token).approve(address(lender), _allowance + _repayment);
+        lender.flashLoan(IERC3156FlashBorrower(address(this)), token, amount, "");
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165) returns (bool) {
+        return interfaceId == type(IERC3156FlashBorrower).interfaceId;
+    }
+}
+
+contract InvalidTestFlashBorrower1 is ERC165 {
+    function supportsInterface(bytes4 /* interfaceId */ ) public view virtual override(ERC165) returns (bool) {
+        return false;
+    }
+}
+
+contract InvalidTestFlashBorrower2 is IERC3156FlashBorrower, ERC165 {
+    IERC3156FlashLender lender;
+
+    constructor(IERC3156FlashLender lender_) {
+        lender = lender_;
+    }
+
+    function onFlashLoan(
+        address, /* initiator*/
+        address, /* token*/
+        uint256, /* amount*/
+        uint256, /*fee*/
+        bytes calldata /*data*/
+    ) external override returns (bytes32) {
+        return keccak256("ERC3156FlashBorrower.0nFlashLoan");
+    }
+
+    function flashBorrow(address token, uint256 amount) public {
+        uint256 _allowance = IERC20(token).allowance(address(this), address(lender));
+        uint256 _fee = lender.flashFee(token, amount); // 0
+        uint256 _repayment = amount + _fee; // amount
+        IERC20(token).approve(address(lender), _allowance + _repayment);
+        lender.flashLoan(IERC3156FlashBorrower(address(this)), token, amount, "");
+    }
+
+    function supportsInterface(bytes4 /* interfaceId */ ) public view virtual override(ERC165) returns (bool) {
+        return true;
+    }
+}
+
 contract PairTest is Test {
     using SafeERC20 for ERC20;
 
@@ -113,6 +190,7 @@ contract PairTest is Test {
         assertEq(blockTimestampLast, 0);
         assertEq(ERC20(token0).balanceOf(user1), 10 ether);
         assertEq(ERC20(token1).balanceOf(user1), 100_000 ether);
+        assertEq(pair.supportsInterface(type(IERC3156FlashLender).interfaceId), true);
     }
 
     function testSetFeeTo() public {
@@ -384,10 +462,108 @@ contract PairTest is Test {
         assertEq(ERC20(token1).balanceOf(user2), amount1 + amount1Out);
         assertEq(ERC20(token0).balanceOf(address(pair)), reserve0.unwrap());
         assertEq(ERC20(token1).balanceOf(address(pair)), reserve1.unwrap());
-        assertEq(ERC20(token0).balanceOf(user2), amount0 - amount0In);
-        assertEq(ERC20(token1).balanceOf(user2), 120_000 ether);
         assertEq(reserve0.unwrap(), amount0 + amount0In);
-        assertEq(reserve1.unwrap(), 80_000 ether);
+        assertEq(reserve1.unwrap(), amount1 - amount1Out);
+    }
+
+    function testMaxFlashLoan() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        vm.startPrank(user2);
+        addLiquidity(amount0, amount1, user2);
+        vm.stopPrank();
+
+        uint256 flashLoan = pair.maxFlashLoan(token0);
+        assertEq(flashLoan, amount0 * 2);
+
+        flashLoan = pair.maxFlashLoan(token1);
+        assertEq(flashLoan, amount1 * 2);
+    }
+
+    function testFlashFee() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        uint256 flashFee = pair.flashFee(token0, amount0);
+        assertEq(flashFee, 0);
+
+        vm.expectRevert();
+        flashFee = pair.flashFee(address(uint160(token0) + 1), amount0);
+    }
+
+    function testFlashLoanFailNotSupportingInterface() public {
+        InvalidTestFlashBorrower1 invalidBorrower = new InvalidTestFlashBorrower1();
+
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+
+        vm.expectRevert(Pair.Pair_Invalid_IERC3156FlashBorrower.selector); // Invalid borrower
+        pair.flashLoan(IERC3156FlashBorrower(address(invalidBorrower)), address(647), amount0 / 2, EMPTY_DATA);
+    }
+
+    function testFlashLoanFailInvalidIERC3156FlashBorrower() public {
+        InvalidTestFlashBorrower2 invalidBorrower = new InvalidTestFlashBorrower2(IERC3156FlashLender(pair));
+
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+
+        vm.expectRevert(Pair.Pair_Invalid_Callback.selector); // Invalid callback
+        //   pair.flashLoan(IERC3156FlashBorrower(address(invalidBorrower)), token0, amount0 / 2, EMPTY_DATA);
+        invalidBorrower.flashBorrow(token0, amount0 / 2);
+    }
+
+    function testFlashLoanFailInvalidToken() public {
+        TestFlashBorrower borrower = new TestFlashBorrower(IERC3156FlashLender(pair));
+
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+
+        vm.expectRevert(Pair.Pair_Invalid_Token.selector); // Invalid token address (address(647))
+        pair.flashLoan(IERC3156FlashBorrower(borrower), address(647), amount0 / 2, EMPTY_DATA);
+    }
+
+    function testFlashLoan() public {
+        TestFlashBorrower borrower = new TestFlashBorrower(IERC3156FlashLender(pair));
+
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+
+        assertEq(0, borrower.counter());
+        borrower.flashBorrow(token0, amount0 / 2);
+        assertEq(1, borrower.counter());
+    }
+
+    function testFeeOn() public {
+        factory.setFeeTo(owner);
+        assertEq(factory.feeTo(), owner);
+
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
     }
 
     function testSkim() public {
