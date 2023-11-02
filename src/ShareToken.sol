@@ -27,8 +27,8 @@ contract ShareToken is Ownable, ERC20Permit {
         emit ShareTokenMinted(to, amount);
     }
 
-    function burn(address to, uint256 amount) external onlyOwner {
-        _burn(to, amount);
-        emit ShareTokenBurned(to, amount);
+    function burn(address from, uint256 amount) external onlyOwner {
+        _burn(from, amount);
+        emit ShareTokenBurned(from, amount);
     }
 }
