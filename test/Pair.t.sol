@@ -350,6 +350,46 @@ contract PairTest is Test {
         assertEq(reserve1.unwrap(), amount1 - amount1Out);
     }
 
+    function testPriceCumulativeLast() public {
+        uint256 amount0 = ERC20(token0).balanceOf(user1);
+        uint256 amount1 = ERC20(token1).balanceOf(user1);
+
+        vm.startPrank(user1);
+        addLiquidity(amount0, amount1, user1);
+        vm.stopPrank();
+
+        assertEq(pair.totalSupply(), Math.sqrt(amount0 * amount1));
+
+        uint256 initialTimestamp = block.timestamp;
+
+        (UD60x18 _reserve0, UD60x18 _reserve1, uint256 blockTimestamp) = pair.getReserves();
+        vm.warp(blockTimestamp + 10);
+        pair.sync();
+        (,, blockTimestamp) = pair.getReserves();
+        assertEq(blockTimestamp, initialTimestamp + 10);
+        assertEq(pair.price0CumulativeLast(), _reserve1.div(_reserve0).unwrap() * 10);
+        assertEq(pair.price1CumulativeLast(), _reserve0.div(_reserve1).unwrap() * 10);
+
+        uint256 amount0In;
+        uint256 amount0Out = 0;
+        uint256 amount1Out = 20_000 ether;
+
+        (UD60x18 reserve0, UD60x18 reserve1,) = pair.getReserves();
+
+        amount0In = (inputAmountPlusFee(reserve0, reserve1, ud(amount1Out))).unwrap(); // 2507522567703109328 ~ 2.5075 ether
+
+        vm.startPrank(user2);
+        ERC20(token0).transfer(address(pair), amount0In);
+        vm.warp(initialTimestamp + 20);
+        pair.swap(amount0Out, amount1Out, user2, EMPTY_DATA);
+        vm.stopPrank();
+
+        (reserve0, reserve1, blockTimestamp) = pair.getReserves();
+        assertEq(blockTimestamp, initialTimestamp + 20);
+        assertEq(pair.price0CumulativeLast(), _reserve1.div(_reserve0).unwrap() * 20);
+        assertEq(pair.price1CumulativeLast(), _reserve0.div(_reserve1).unwrap() * 20);
+    }
+
     function testMaxFlashLoan() public {
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
