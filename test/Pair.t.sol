@@ -4,6 +4,8 @@ pragma solidity 0.8.21;
 import {Test, console2} from "forge-std/Test.sol";
 import {Factory} from "../src/Factory.sol";
 import {Pair} from "../src/Pair.sol";
+import {Token0, Token1} from "../src/mock/Tokens.sol";
+import {FlashBorrower, InvalidFlashBorrower1, InvalidFlashBorrower2} from "../src/mock/FlashLoanBorrowers.sol";
 import {ERC20, IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 
@@ -12,99 +14,6 @@ import {IERC3156FlashLender} from "lib/openzeppelin-contracts/contracts/interfac
 import {IERC3156FlashBorrower} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashBorrower.sol";
 import {ERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
 import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
-
-contract Token0 is ERC20 {
-    constructor() ERC20("Token0", "TKN0") {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
-}
-
-contract Token1 is ERC20 {
-    constructor() ERC20("Token1", "TKN1") {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
-}
-
-contract TestFlashBorrower is IERC3156FlashBorrower, ERC165 {
-    IERC3156FlashLender lender;
-    uint256 public counter;
-
-    constructor(IERC3156FlashLender lender_) {
-        lender = lender_;
-    }
-
-    /// @dev ERC-3156 Flash loan callback
-    function onFlashLoan(
-        address initiator,
-        address, /* token*/
-        uint256, /* amount*/
-        uint256, /*fee*/
-        bytes calldata /*data*/
-    ) external override returns (bytes32) {
-        require(msg.sender == address(lender));
-        require(initiator == address(this));
-
-        counter++;
-
-        return keccak256("ERC3156FlashBorrower.onFlashLoan");
-    }
-
-    /// @dev Initiate a flash loan
-    function flashBorrow(address token, uint256 amount) public {
-        uint256 _allowance = IERC20(token).allowance(address(this), address(lender));
-        uint256 _fee = lender.flashFee(token, amount); // 0
-        uint256 _repayment = amount + _fee; // amount
-        IERC20(token).approve(address(lender), _allowance + _repayment);
-        lender.flashLoan(IERC3156FlashBorrower(address(this)), token, amount, "");
-    }
-
-    /**
-     * @dev See {IERC165-supportsInterface}.
-     */
-    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165) returns (bool) {
-        return interfaceId == type(IERC3156FlashBorrower).interfaceId;
-    }
-}
-
-contract InvalidTestFlashBorrower1 is ERC165 {
-    function supportsInterface(bytes4 /* interfaceId */ ) public view virtual override(ERC165) returns (bool) {
-        return false;
-    }
-}
-
-contract InvalidTestFlashBorrower2 is IERC3156FlashBorrower, ERC165 {
-    IERC3156FlashLender lender;
-
-    constructor(IERC3156FlashLender lender_) {
-        lender = lender_;
-    }
-
-    function onFlashLoan(
-        address, /* initiator*/
-        address, /* token*/
-        uint256, /* amount*/
-        uint256, /*fee*/
-        bytes calldata /*data*/
-    ) external override returns (bytes32) {
-        return keccak256("ERC3156FlashBorrower.0nFlashLoan");
-    }
-
-    function flashBorrow(address token, uint256 amount) public {
-        uint256 _allowance = IERC20(token).allowance(address(this), address(lender));
-        uint256 _fee = lender.flashFee(token, amount); // 0
-        uint256 _repayment = amount + _fee; // amount
-        IERC20(token).approve(address(lender), _allowance + _repayment);
-        lender.flashLoan(IERC3156FlashBorrower(address(this)), token, amount, "");
-    }
-
-    function supportsInterface(bytes4 /* interfaceId */ ) public view virtual override(ERC165) returns (bool) {
-        return true;
-    }
-}
 
 contract PairTest is Test {
     using SafeERC20 for ERC20;
@@ -179,24 +88,15 @@ contract PairTest is Test {
     }
 
     function testSetUp() public {
-        assertEq(factory.allPairsLength(), 1);
-        assertEq(factory.allPairs(0), address(pair));
-        assertEq(factory.owner(), owner);
-        assertEq(factory.feeTo(), address(0));
-        assertEq(pair.totalSupply(), 0);
         (UD60x18 reserve0, UD60x18 reserve1, uint32 blockTimestampLast) = pair.getReserves();
+
+        assertEq(pair.totalSupply(), 0);
         assertEq(reserve0.unwrap(), 0);
         assertEq(reserve1.unwrap(), 0);
         assertEq(blockTimestampLast, 0);
         assertEq(ERC20(token0).balanceOf(user1), 10 ether);
         assertEq(ERC20(token1).balanceOf(user1), 100_000 ether);
         assertEq(pair.supportsInterface(type(IERC3156FlashLender).interfaceId), true);
-    }
-
-    function testSetFeeTo() public {
-        vm.prank(owner);
-        factory.setFeeTo(owner);
-        assertEq(factory.feeTo(), owner);
     }
 
     function testMint() public {
@@ -249,22 +149,6 @@ contract PairTest is Test {
 
         assertEq(pair.price0CumulativeLast(), (reserve1.div(reserve0)).unwrap() * 12);
         assertEq(pair.price1CumulativeLast(), (reserve0.div(reserve1)).unwrap() * 12);
-    }
-
-    function testMintInvalidReserves() public {
-        uint256 amount0 = ERC20(token0).balanceOf(user1);
-        uint256 amount1 = ERC20(token1).balanceOf(user1);
-
-        vm.startPrank(user1);
-        addLiquidity(amount0, amount1, user1);
-        vm.stopPrank();
-
-        vm.startPrank(user2);
-        ERC20(token0).safeTransfer(address(pair), amount0 - 10);
-        ERC20(token1).safeTransfer(address(pair), amount1);
-        vm.expectRevert();
-        pair.mint(user2);
-        vm.stopPrank();
     }
 
     function testMintFailInsufficientLiquidityMinted() public {
@@ -501,7 +385,7 @@ contract PairTest is Test {
     }
 
     function testFlashLoanFailNotSupportingInterface() public {
-        InvalidTestFlashBorrower1 invalidBorrower = new InvalidTestFlashBorrower1();
+        InvalidFlashBorrower1 invalidBorrower = new InvalidFlashBorrower1();
 
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
@@ -514,7 +398,7 @@ contract PairTest is Test {
     }
 
     function testFlashLoanFailInvalidIERC3156FlashBorrower() public {
-        InvalidTestFlashBorrower2 invalidBorrower = new InvalidTestFlashBorrower2(IERC3156FlashLender(pair));
+        InvalidFlashBorrower2 invalidBorrower = new InvalidFlashBorrower2(IERC3156FlashLender(pair));
 
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
@@ -528,7 +412,7 @@ contract PairTest is Test {
     }
 
     function testFlashLoanFailInvalidToken() public {
-        TestFlashBorrower borrower = new TestFlashBorrower(IERC3156FlashLender(pair));
+        FlashBorrower borrower = new FlashBorrower(IERC3156FlashLender(pair));
 
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
@@ -541,7 +425,7 @@ contract PairTest is Test {
     }
 
     function testFlashLoan() public {
-        TestFlashBorrower borrower = new TestFlashBorrower(IERC3156FlashLender(pair));
+        FlashBorrower borrower = new FlashBorrower(IERC3156FlashLender(pair));
 
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
@@ -555,8 +439,11 @@ contract PairTest is Test {
     }
 
     function testFeeOn() public {
+        vm.startPrank(owner);
         factory.setFeeTo(owner);
+        vm.stopPrank();
         assertEq(factory.feeTo(), owner);
+        assertEq(pair.balanceOf(owner), 0);
 
         uint256 amount0 = ERC20(token0).balanceOf(user1);
         uint256 amount1 = ERC20(token1).balanceOf(user1);
@@ -564,6 +451,50 @@ contract PairTest is Test {
         vm.startPrank(user1);
         addLiquidity(amount0, amount1, user1);
         vm.stopPrank();
+
+        (UD60x18 reserve0, UD60x18 reserve1,) = pair.getReserves();
+
+        assertEq(pair.balanceOf(owner), 0);
+        assertEq(pair.kLast(), reserve0.unwrap() * reserve1.unwrap());
+
+        uint256 amount0In;
+        uint256 amount0Out = 0;
+        uint256 amount1Out = 20_000 ether;
+
+        amount0In = (inputAmountPlusFee(reserve0, reserve1, ud(amount1Out))).unwrap(); // 2507522567703109328 ~ 2.5075 ether
+
+        vm.startPrank(user2);
+        ERC20(token0).transfer(address(pair), amount0In);
+        pair.swap(amount0Out, amount1Out, user2, EMPTY_DATA);
+        vm.stopPrank();
+
+        vm.startPrank(user1);
+        uint256 amount = pair.balanceOf(user1);
+        emit log_uint(pair.totalSupply());
+        emit log_uint(amount);
+        ERC20(pair).transfer(address(pair), amount);
+        pair.burn(user1);
+        vm.stopPrank();
+
+        (reserve0, reserve1,) = pair.getReserves();
+        emit log_uint(reserve0.unwrap());
+        emit log_uint(reserve1.unwrap());
+        emit log_uint(pair.kLast());
+
+        assertGt(pair.balanceOf(owner), 0);
+        emit log_uint(pair.balanceOf(owner));
+        emit log_uint(ERC20(token0).balanceOf(user1));
+        emit log_uint(ERC20(token1).balanceOf(user1));
+
+        vm.startPrank(owner);
+        factory.setFeeTo(address(0));
+        vm.stopPrank();
+
+        vm.startPrank(user3);
+        addLiquidity(amount0 / 2, amount1 / 2, user3);
+        vm.stopPrank();
+
+        assertEq(pair.kLast(), 0);
     }
 
     function testSkim() public {
