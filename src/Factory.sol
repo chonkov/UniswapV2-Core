@@ -5,13 +5,12 @@ import {Ownable2Step, Ownable} from "lib/openzeppelin-contracts/contracts/access
 import {IFactory} from "./interfaces/IFactory.sol";
 import {Pair} from "./Pair.sol";
 
-error Factory_Identical_Addresses();
-error Factory_Zero_Address();
-error Factory_Pair_Already_Exists();
-
 contract Factory is IFactory, Ownable2Step {
-    address private _feeTo;
+    error Factory_Identical_Addresses();
+    error Factory_Zero_Address();
+    error Factory_Pair_Already_Exists();
 
+    address private _feeTo;
     mapping(address => mapping(address => address)) private _pairs;
     address[] private _allPairs;
 

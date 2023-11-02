@@ -15,24 +15,35 @@ import {IFactory} from "./interfaces/IFactory.sol";
 import {ICallee} from "./interfaces/ICallee.sol";
 import {ShareToken} from "./ShareToken.sol";
 
-error Pair_Locked();
-error Pair_Invalid_Amounts();
-error Pair_Insufficient_Liquidity();
-error Pair_Insufficient_Liquidity_Minted();
-error Pair_Insufficient_Liquidity_Burned();
-error Pair_Overflow();
-error Pair_Invalid_Receiver();
-error Pair_Invalid_K();
+contract Vault {}
 
 contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    uint256 public constant MINIMUM_LIQUIDITY = 10 ** 3;
+    error Pair_Locked();
+    error Pair_Invalid_Out_Amounts();
+    error Pair_Invalid_In_Amounts();
+    error Pair_Insufficient_Liquidity();
+    error Pair_Insufficient_Liquidity_Minted();
+    error Pair_Insufficient_Liquidity_Burned();
+    error Pair_Overflow();
+    error Pair_Invalid_Receiver();
+    error Pair_Invalid_K();
+    error Pair_Invalid_IERC3156FlashBorrower();
+    error Pair_Invalid_Token();
+    error Pair_Invalid_Callback();
+
+    event Log(string);
+    event LogU(uint256);
+    event LogA(address);
+
+    uint256 public constant MINIMUM_LIQUIDITY = 1000;
     bytes32 public constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     address public immutable factory;
     address public immutable token0;
     address public immutable token1;
+    Vault public immutable vault; // Contract where initial liquidity is locked forever
 
     UD60x18 private reserve0;
     UD60x18 private reserve1;
@@ -46,6 +57,7 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         factory = _msgSender();
         token0 = _token0;
         token1 = _token1;
+        vault = new Vault();
     }
 
     function _update(uint256 balance0, uint256 balance1, uint256 _reserve0, uint256 _reserve1) private {
@@ -104,11 +116,15 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
-            _mint(address(0), MINIMUM_LIQUIDITY);
+            _mint(address(vault), MINIMUM_LIQUIDITY);
         } else {
             liquidity =
                 Math.min((amount0 * _totalSupply) / _reserve0.unwrap(), (amount1 * _totalSupply) / _reserve1.unwrap());
-            assert(UD60x18.wrap(amount0).div(_reserve0) == UD60x18.wrap(amount0).div(_reserve0));
+
+            // UD60x18 ratio0 = UD60x18.wrap(amount0).div(_reserve0);
+            // UD60x18 ratio1 = UD60x18.wrap(amount1).div(_reserve1);
+
+            // if (ratio0 != ratio1) revert Pair_Invalid_Ratio();
         }
         if (liquidity == 0) revert Pair_Insufficient_Liquidity_Minted();
         _mint(to, liquidity);
@@ -144,14 +160,17 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         emit Burn(_msgSender(), amount0, amount1, to);
     }
 
-    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external nonReentrant {
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata /* data */ )
+        external
+        nonReentrant
+    {
         // Example:
         // token0 = ETH, token1 = DAI
         // Before swap is made and no tokens are transfered: reserve0 = 10 ETH, reserve1 = 10,000 DAI => K = 100,000
         // Before `swap` is called - user calls 'transfer' and sends 2,5 ETH => reserve0 = 12,5 ETH => amount0Out = 0 && amount1Out = 2,000
         // amount1Out = reserve1 - K / reserve0' (reserve0' = reserve0 + 2,5 ETH = 12,5 ETH)
 
-        if ((amount0Out == 0 && amount1Out == 0) || (amount0Out > 0 && amount1Out > 0)) revert Pair_Invalid_Amounts();
+        if (amount0Out == 0 && amount1Out == 0) revert Pair_Invalid_Out_Amounts();
         (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
 
         if (amount0Out >= _reserve0.unwrap() || amount1Out >= _reserve1.unwrap()) revert Pair_Insufficient_Liquidity();
@@ -164,7 +183,7 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
 
             if (amount0Out > 0) IERC20(token0).safeTransfer(to, amount0Out);
             if (amount1Out > 0) IERC20(token1).safeTransfer(to, amount1Out);
-            if (data.length > 0) ICallee(to).uniswapV2Call(_msgSender(), amount0Out, amount1Out, data); // 'FlashSwap'
+            // if (data.length > 0) ICallee(to).uniswapV2Call(_msgSender(), amount0Out, amount1Out, data); // 'FlashSwap'
             balance0 = IERC20(token0).balanceOf(address(this));
             balance1 = IERC20(token1).balanceOf(address(this));
         }
@@ -176,7 +195,7 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         uint256 amount1In =
             balance1 > _reserve1.unwrap() - amount1Out ? balance1 - (_reserve1.unwrap() - amount1Out) : 0;
 
-        if (amount0In == 0 && amount1In == 0) revert Pair_Invalid_Amounts();
+        if (amount0In == 0 && amount1In == 0) revert Pair_Invalid_In_Amounts();
         {
             // scope for reserve{0,1}Adjusted, avoids stack too deep errors
             uint256 balance0Adjusted = balance0 * 1000 - amount0In * 3;
@@ -219,16 +238,23 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         returns (bool)
     {
         // "Receiver must implement IERC3156FlashBorrower interafce."
-        if (ERC165(address(receiver)).supportsInterface(type(IERC3156FlashBorrower).interfaceId)) revert();
-        //  "FlashLender: Unsupported currency"
-        if (token != token0 && token != token1) revert();
+        if (!(ERC165(address(receiver)).supportsInterface(type(IERC3156FlashBorrower).interfaceId))) {
+            revert Pair_Invalid_IERC3156FlashBorrower();
+        }
 
-        uint256 calculatedLoanFee = _flashFee(token, amount);
+        //  "FlashLender: Unsupported currency"
+        if (token != token0 && token != token1) revert Pair_Invalid_Token();
+
+        uint256 calculatedLoanFee = flashFee(token, amount);
 
         IERC20(token).safeTransfer(address(receiver), amount);
 
+        emit LogA(_msgSender());
+
         // "FlashLender: Callback failed"
-        if (receiver.onFlashLoan(_msgSender(), token, amount, calculatedLoanFee, data) != CALLBACK_SUCCESS) revert();
+        if (receiver.onFlashLoan(_msgSender(), token, amount, calculatedLoanFee, data) != CALLBACK_SUCCESS) {
+            revert Pair_Invalid_Callback();
+        }
 
         IERC20(token).safeTransferFrom(address(receiver), address(this), amount + calculatedLoanFee);
 
@@ -237,22 +263,13 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
 
     /**
      * @dev The fee to be charged for a given loan.
+     * @notice Makes a check and returns zero -> no fee is charged.
      * @param token The loan currency.
-     * @param amount The amount of tokens lent.
      * @return The amount of `token` to be charged for the loan, on top of the returned principal.
      */
-    function flashFee(address token, uint256 amount) external view override returns (uint256) {
+    function flashFee(address token, uint256 /* amount */ ) public view override returns (uint256) {
         //  "FlashLender: Unsupported currency"
         if (token != token0 && token != token1) revert();
-        return _flashFee(token, amount);
-    }
-
-    /**
-     * @dev The fee to be charged for a given loan. Internal function with no checks.
-     * @notice The fee is 0, since there are no charges on flash swaps.
-     * @return The amount of `token` to be charged for the loan, on top of the returned principal.
-     */
-    function _flashFee(address, /*token*/ uint256 /*amount*/ ) internal pure returns (uint256) {
         return 0;
     }
 
