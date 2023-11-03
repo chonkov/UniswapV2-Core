@@ -66,14 +66,19 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         }
 
         uint32 blockTimestamp = uint32(block.timestamp % 2 ** 32);
-        uint32 timeElapsed = blockTimestamp - blockTimestampLast;
+        uint32 timeElapsed;
+        unchecked {
+            timeElapsed = blockTimestamp - blockTimestampLast;
+        }
 
         if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
             UD60x18 udReserve0 = ud(_reserve0);
             UD60x18 udReserve1 = ud(_reserve1);
 
-            price0CumulativeLast += udReserve1.div(udReserve0).unwrap() * timeElapsed;
-            price1CumulativeLast += udReserve0.div(udReserve1).unwrap() * timeElapsed;
+            unchecked {
+                price0CumulativeLast += udReserve1.div(udReserve0).unwrap() * timeElapsed;
+                price1CumulativeLast += udReserve0.div(udReserve1).unwrap() * timeElapsed;
+            }
         }
 
         reserve0 = UD60x18.wrap(balance0);
