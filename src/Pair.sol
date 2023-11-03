@@ -33,10 +33,6 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
     error Pair_Invalid_Token();
     error Pair_Invalid_Callback();
 
-    event Log(string);
-    event LogU(uint256);
-    event LogA(address);
-
     uint256 public constant MINIMUM_LIQUIDITY = 1000;
     bytes32 public constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
@@ -60,6 +56,13 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         vault = new Vault();
     }
 
+    /**
+     * @dev Updates the reserves and accumulated prices since the last swap/mint/burn
+     * @param balance0 Actual amount of the first token in the pool.
+     * @param balance1 Actual amount of the second token in the pool.
+     * @param _reserve0 Current reserve/amount of the first token in the pool.
+     * @param _reserve1 Current reserve/amount of the second token in the pool.
+     */
     function _update(uint256 balance0, uint256 balance1, uint256 _reserve0, uint256 _reserve1) private {
         if (UD60x18.wrap(balance0) > MAX_WHOLE_UD60x18 || UD60x18.wrap(balance1) > MAX_WHOLE_UD60x18) {
             revert Pair_Overflow();
@@ -88,6 +91,12 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         emit Sync(reserve0, reserve1);
     }
 
+    /**
+     * @dev Determine whether the fee is on and send tokens to the recipient address
+     * @param _reserve0 Current reserve/amount of the first token in the pool.
+     * @param _reserve1 Current reserve/amount of the second token in the pool.
+     * @return feeOn Returns whether or not the fee is turned on.
+     */
     function _mintFee(UD60x18 _reserve0, UD60x18 _reserve1) private returns (bool feeOn) {
         address feeTo = IFactory(factory).feeTo();
         feeOn = feeTo != address(0);
@@ -109,6 +118,11 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         }
     }
 
+    /**
+     * @dev Sends liquidity tokens to the address providing liquidity to the pool.
+     * @param to The receiver of the liquidity/share tokens.
+     * @return liquidity Returns the amount of minted tokens.
+     */
     function mint(address to) external nonReentrant returns (uint256 liquidity) {
         (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
@@ -140,6 +154,12 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         emit Mint(_msgSender(), amount0, amount1);
     }
 
+    /**
+     * @dev Sends back the tokens of the liquidity provider by `burning` the transfered tokens representing his/her portion of the pool.
+     * @param to The receiver of the tokens.
+     * @return amount0 The amount of the first returned back.
+     * @return amount1 The amount of the second returned back.
+     */
     function burn(address to) external nonReentrant returns (uint256 amount0, uint256 amount1) {
         (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
@@ -165,6 +185,12 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         emit Burn(_msgSender(), amount0, amount1, to);
     }
 
+    /**
+     * @dev Transfer tokens to receiver `preserving` the `constant` after the swap is completed.
+     * @param amount0Out Amount of the first of the pair of tokens to transfer.
+     * @param amount1Out Amount of the second of the pair of tokens to transfer.
+     * @param to The receiver of the tokens.
+     */
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata /* data */ )
         external
         nonReentrant
@@ -215,11 +241,18 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         emit Swap(_msgSender(), amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
+    /**
+     * @dev Sends extra tokens to an address the reserves by correctly updating them if tokens were directly sent
+     * @param to Address to receive extra tokens
+     */
     function skim(address to) external nonReentrant {
         IERC20(token0).safeTransfer(to, IERC20(token0).balanceOf(address(this)) - reserve0.unwrap());
         IERC20(token1).safeTransfer(to, IERC20(token1).balanceOf(address(this)) - reserve1.unwrap());
     }
 
+    /**
+     * @dev Syncs the reserves by correctly updating them if tokens were directly sent
+     */
     function sync() external nonReentrant {
         _update(
             IERC20(token0).balanceOf(address(this)),
@@ -253,8 +286,6 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
         uint256 calculatedLoanFee = flashFee(token, amount);
 
         IERC20(token).safeTransfer(address(receiver), amount);
-
-        emit LogA(_msgSender());
 
         // "FlashLender: Callback failed"
         if (receiver.onFlashLoan(_msgSender(), token, amount, calculatedLoanFee, data) != CALLBACK_SUCCESS) {
