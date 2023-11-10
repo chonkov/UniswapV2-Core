@@ -294,6 +294,12 @@ contract Pair is IPair, Context, ERC165, IERC3156FlashLender, ShareToken, Reentr
 
         IERC20(token).safeTransferFrom(address(receiver), address(this), amount + calculatedLoanFee);
 
+        (UD60x18 _reserve0, UD60x18 _reserve1,) = getReserves();
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+        
+        _update(balance0, balance1, _reserve0.unwrap(), _reserve1.unwrap());
+
         return true;
     }
 

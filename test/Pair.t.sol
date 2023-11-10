@@ -12,7 +12,7 @@ import {Math} from "lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC3156FlashLender} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashLender.sol";
 import {IERC3156FlashBorrower} from "lib/openzeppelin-contracts/contracts/interfaces/IERC3156FlashBorrower.sol";
-import {ERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
+import {ERC165, IERC165} from "lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol";
 import {UD60x18, ud, MAX_WHOLE_UD60x18} from "lib/prb-math/src/UD60x18.sol";
 
 contract PairTest is Test {
@@ -97,6 +97,8 @@ contract PairTest is Test {
         assertEq(ERC20(token0).balanceOf(user1), 10 ether);
         assertEq(ERC20(token1).balanceOf(user1), 100_000 ether);
         assertEq(pair.supportsInterface(type(IERC3156FlashLender).interfaceId), true);
+        assertEq(pair.supportsInterface(type(IERC165).interfaceId), true);
+        assertEq(pair.supportsInterface(type(IERC20).interfaceId), false);
     }
 
     function testMint() public {
